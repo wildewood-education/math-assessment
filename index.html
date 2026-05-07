@@ -608,124 +608,278 @@ async function generateReport() {
 }
 
 function buildReportFromScores(info) {
-  const { studentName, firstName, grade, gradeLabel, mcScore, frScore, totalScore, pct, perfLevel, perfDesc, frResults, mcResults } = info;
+  const {
+    studentName, firstName, instructor, assessDate,
+    grade, gradeLabel, mcScore, frScore, totalScore, pct,
+    frResults, mcResults
+  } = info;
+ 
   const gradeLabelSafe = gradeLabel || (typeof grade === 'number' ? 'Grade ' + grade : String(grade));
   const frqs = FR_DATA[grade];
-
-  // Find strongest and weakest FR questions
-  const sorted = [...frResults].sort((a,b) => (b.qTotal/b.maxPoints) - (a.qTotal/a.maxPoints));
-  const strongest = sorted[0];
-  const weakest = sorted[sorted.length-1];
-
-  // MC analysis — find which questions were wrong
-  const wrong = mcResults.filter(r => !r.ok && r.given !== '(blank)');
-  const blank = mcResults.filter(r => r.given === '(blank)');
-  const mcPct = Math.round(mcScore/20*100);
-  const frPct = Math.round(frScore/40*100);
-
-  // Criterion-level analysis
-  let allCrits = [];
-  frResults.forEach((q, qi) => {
-    q.crits.forEach(c => {
-      if (c.score !== null) allCrits.push({ ...c, qTitle: q.title, std: q.std });
+  const key  = ANSWER_KEYS[grade];
+ 
+  // ── helpers ────────────────────────────────────────────────────────────────
+  const mcPct = Math.round(mcScore / 20 * 100);
+  const frPct = Math.round(frScore / 40 * 100);
+ 
+  const perfLabel = pct >= 80 ? 'strong' : pct >= 60 ? 'developing' : 'emerging';
+  const perfDesc  = pct >= 80 ? 'a strong performance' : pct >= 60 ? 'a developing level of mastery' : 'an emerging level of mastery';
+ 
+  // ── criterion-level data ───────────────────────────────────────────────────
+  // For each FR question, figure out exactly which criteria were full / partial / missed
+  const enrichedFR = frResults.map((q, qi) => {
+    const fullCrits    = q.crits.filter(c => c.score === 2);
+    const partialCrits = q.crits.filter(c => c.score === 1);
+    const noCrits      = q.crits.filter(c => c.score === 0);
+    const scoredCrits  = q.crits.filter(c => c.score !== null);
+    const pctQ         = q.maxPoints > 0 ? Math.round(q.qTotal / q.maxPoints * 100) : 0;
+    const perfQ        = pctQ >= 75 ? 'Demonstrated' : pctQ >= 37.5 ? 'Approaching' : 'Needs Support';
+ 
+    // Pull the standard codes out of the std string (e.g. "1.OA.A.1 / 1.OA.C.6")
+    const stdCodes = q.std.split('/').map(s => s.trim());
+ 
+    return {
+      ...q,
+      fullCrits, partialCrits, noCrits, scoredCrits,
+      pctQ, perfQ, stdCodes,
+      primaryStd: stdCodes[0]
+    };
+  });
+ 
+  // ── MC error pattern ───────────────────────────────────────────────────────
+  const mcWrong  = mcResults.filter(r => !r.ok && r.given !== '(blank)');
+  const mcBlank  = mcResults.filter(r => r.given === '(blank)');
+  const mcCorrect = mcResults.filter(r => r.ok);
+ 
+  // ── INTRO ──────────────────────────────────────────────────────────────────
+  const dateStr = assessDate
+    ? new Date(assessDate).toLocaleDateString('en-US', { year: 'numeric', month: 'long', day: 'numeric' })
+    : 'a recent session';
+ 
+  const intro = `On ${dateStr}, ${firstName} completed the Wildewood Education ${gradeLabelSafe} Mathematics Practice Assessment. This assessment is aligned to the 2017 Massachusetts Curriculum Frameworks and covers all major domains of ${gradeLabelSafe} mathematics through 20 multiple choice questions and 5 free response questions — including one error analysis task that asks students to identify, explain, and correct a mathematical mistake. The results below offer a detailed, standard-by-standard picture of ${firstName}'s current mathematical understanding, with evidence drawn directly from their individual criterion scores on each question.`;
+ 
+  // ── OVERALL SUMMARY ────────────────────────────────────────────────────────
+  const demonstratedQs = enrichedFR.filter(q => q.perfQ === 'Demonstrated').map(q => q.title);
+  const needsQs        = enrichedFR.filter(q => q.perfQ === 'Needs Support').map(q => q.title);
+  const approachingQs  = enrichedFR.filter(q => q.perfQ === 'Approaching').map(q => q.title);
+ 
+  const listOr = arr => arr.length === 0 ? '' : arr.length === 1 ? arr[0] : arr.slice(0,-1).join(', ') + ' and ' + arr[arr.length-1];
+ 
+  let mcSentence;
+  if (mcScore >= 16)      mcSentence = `This is a strong multiple choice result, indicating reliable command of key ${gradeLabelSafe} concepts across most domains.`;
+  else if (mcScore >= 12) mcSentence = `This indicates solid understanding in a number of domains, with opportunities to strengthen conceptual fluency in others.`;
+  else if (mcScore >= 8)  mcSentence = `This result suggests that several core concepts in ${gradeLabelSafe} are still developing and would benefit from focused review.`;
+  else                    mcSentence = `This result indicates that a number of foundational ${gradeLabelSafe} concepts need direct instruction and reinforcement.`;
+ 
+  let frNarrative = '';
+  if (demonstratedQs.length > 0) frNarrative += ` ${firstName} demonstrated secure mastery on ${listOr(demonstratedQs)}.`;
+  if (approachingQs.length > 0)  frNarrative += ` Partial understanding was evident on ${listOr(approachingQs)}, where some criteria were met but others were not.`;
+  if (needsQs.length > 0)        frNarrative += ` The areas requiring the most instructional support are ${listOr(needsQs)}, where key criteria were not yet demonstrated.`;
+ 
+  const overallSummary = `${firstName} earned a total score of ${totalScore} out of 60 points (${pct}%), reflecting ${perfDesc} of ${gradeLabelSafe} mathematics content. On the multiple choice section, ${firstName} answered ${mcScore} out of 20 questions correctly (${mcPct}%). ${mcSentence} On the free response section — which requires students to show full reasoning, apply procedures accurately, and explain their thinking — ${firstName} earned ${frScore} out of 40 points (${frPct}%).${frNarrative} The standard-by-standard analysis below translates these numbers into specific, actionable instructional targets.`;
+ 
+  // ── STRENGTHS ──────────────────────────────────────────────────────────────
+  const strengthCards = [];
+ 
+  // MC strength
+  if (mcScore >= 15) {
+    strengthCards.push({
+      title: 'Strong conceptual knowledge across domains',
+      detail: `${firstName} answered ${mcScore} out of 20 multiple choice questions correctly (${mcPct}%), demonstrating reliable command of the conceptual content across the ${gradeLabelSafe} domains assessed. Only ${20 - mcScore} question${20 - mcScore !== 1 ? 's were' : ' was'} answered incorrectly${mcWrong.length > 0 ? ` (Q${mcWrong.map(r=>r.q).join(', Q')})` : ''}, a strong result that suggests ${firstName} has internalized most of the grade-level concepts.`
+    });
+  } else if (mcScore >= 10) {
+    strengthCards.push({
+      title: 'Solid conceptual foundation in multiple areas',
+      detail: `${firstName} answered ${mcScore} out of 20 multiple choice questions correctly (${mcPct}%), showing genuine understanding across several ${gradeLabelSafe} domains. The ${mcScore} correct responses provide a meaningful foundation to build from, even as targeted review is needed on the ${20 - mcScore} questions answered incorrectly${mcWrong.length > 0 ? ` (Q${mcWrong.map(r=>r.q).join(', Q')})` : ''}.`
+    });
+  }
+ 
+  // FR strengths — questions with strong scores
+  const strongFR = enrichedFR.filter(q => q.perfQ === 'Demonstrated' || q.pctQ >= 62.5);
+  strongFR.slice(0, 2).forEach(q => {
+    const fullList = q.fullCrits.map(c => `"${c.criterion.split('(')[0].trim().replace(/\.$/, '')}"`);
+    const fullSummary = fullList.length > 0
+      ? `Full credit was earned on: ${fullList.slice(0,2).join('; ')}${fullList.length > 2 ? '; and others' : ''}.`
+      : '';
+    strengthCards.push({
+      title: `Demonstrated: ${q.title} (${q.primaryStd})`,
+      detail: `${firstName} earned ${q.qTotal} out of ${q.maxPoints} points (${q.pctQ}%) on the "${q.title}" question, which addresses ${q.std}. ${fullSummary} This represents a genuine strength — the Massachusetts Curriculum Frameworks for ${gradeLabelSafe} require students to ${q.fullCrits.length > 0 ? q.fullCrits[0].criterion.toLowerCase().split('(')[0].trim().replace(/\.$/, '') : q.criteria[0].toLowerCase().split('(')[0].trim().replace(/\.$/, '')}, and ${firstName}'s response showed this skill is securely in place.`
     });
   });
-  const fullCredit = allCrits.filter(c => c.score === 2);
-  const noCredit = allCrits.filter(c => c.score === 0);
-  const partial = allCrits.filter(c => c.score === 1);
-
-  // Build standards analysis from FR scores
-  const standardsAnalysis = frResults.slice(0, 5).map(q => {
-    const qPct = Math.round(q.qTotal / q.maxPoints * 100);
-    const perf = qPct >= 75 ? 'Demonstrated' : qPct >= 50 ? 'Approaching' : 'Needs Support';
-    const stdCode = q.std.split(' / ')[0];
-    const fullCredits = q.crits.filter(c => c.score === 2).length;
-    const noCredits = q.crits.filter(c => c.score === 0).length;
-
-    const analysisMap = {
-      'Demonstrated': `${firstName} demonstrated solid understanding on this question, earning ${q.qTotal} out of ${q.maxPoints} points (${Math.round(q.qTotal/q.maxPoints*100)}%). ${fullCredits} out of ${q.criteria.length} criteria were met at full credit. The Massachusetts Curriculum Frameworks for ${gradeLabelSafe} require students to ${q.criteria[0].toLowerCase().split('(')[0].trim()}, and ${firstName}'s response showed that this skill is securely in place. This is a genuine strength and a reliable foundation for more advanced work in this domain.`,
-      'Approaching': `${firstName} showed partial understanding on this question, earning ${q.qTotal} out of ${q.maxPoints} points (${Math.round(q.qTotal/q.maxPoints*100)}%). ${fullCredits > 0 ? `${fullCredits} criterion/criteria were fully demonstrated` : 'Some criteria showed emerging understanding'}, but ${noCredits > 0 ? `${noCredits} criterion/criteria received no credit` : 'several criteria were only partially met'}, indicating that the concepts are not yet consistently secure. The Massachusetts Curriculum Frameworks expect ${gradeLabelSafe} students to ${q.criteria[0].toLowerCase().split('(')[0].trim()}. Targeted review with worked examples and guided practice would help ${firstName} close this gap.`,
-      'Needs Support': `${firstName} struggled significantly with this question, earning only ${q.qTotal} out of ${q.maxPoints} points (${Math.round(q.qTotal/q.maxPoints*100)}%). ${noCredits > 0 ? `${noCredits} out of ${q.criteria.length} criteria received no credit at all` : 'Most criteria were not yet demonstrated'}, which indicates that the foundational concepts behind this standard need direct instruction. The Massachusetts Curriculum Frameworks for ${gradeLabelSafe} require students to ${q.criteria[0].toLowerCase().split('(')[0].trim()}. Before ${firstName} can make meaningful progress in this area, we recommend revisiting prerequisite skills, using concrete or visual models, and providing multiple worked examples before asking for independent application.`
-    };
-
-    const recMap = {
-      'Demonstrated': `Continue to reinforce this skill through mixed practice problems. Consider extending to more complex applications of ${stdCode}.`,
-      'Approaching': `Revisit the underlying concepts for ${stdCode} using visual models and worked examples. Focus particularly on the criteria that received partial or no credit.`,
-      'Needs Support': `Prioritize targeted instruction on ${stdCode}. Use manipulatives, visual models, and step-by-step worked examples. Re-assess after focused practice.`
-    };
-
+ 
+  // Criterion-level strengths
+  const allFullCrits = enrichedFR.flatMap(q => q.fullCrits.map(c => ({ ...c, qTitle: q.title, std: q.primaryStd })));
+  if (allFullCrits.length >= 5 && strongFR.length === 0) {
+    strengthCards.push({
+      title: 'Consistent full-credit responses on specific skills',
+      detail: `Across the free response section, ${firstName} earned full credit (2/2) on ${allFullCrits.length} individual criteria. Examples include: ${allFullCrits.slice(0,2).map(c => `"${c.criterion.split('(')[0].trim().replace(/\.$/, '')}" (${c.std})`).join('; ')}. This criterion-level evidence shows that when ${firstName} understands a skill, they can demonstrate it completely and accurately.`
+    });
+  }
+ 
+  if (strengthCards.length === 0) {
+    strengthCards.push({
+      title: 'Full engagement with all assessment sections',
+      detail: `${firstName} attempted all five free response questions and all 20 multiple choice items, providing a complete picture of their current skill level. Even where scores are low, the engagement with every problem is an important baseline and starting point for growth.`
+    });
+  }
+ 
+  // ── GROWTH AREAS ───────────────────────────────────────────────────────────
+  const growthCards = [];
+ 
+  // MC errors
+  if (mcWrong.length >= 6) {
+    growthCards.push({
+      title: 'Multiple choice accuracy needs attention',
+      detail: `${firstName} answered ${mcWrong.length} multiple choice questions incorrectly (Q${mcWrong.map(r=>r.q).join(', Q')}). These questions assess conceptual understanding across all ${gradeLabelSafe} domains and cover a wide range of standards. Reviewing the specific questions that were missed — and comparing the student's choice to the correct answer — will help pinpoint which conceptual areas need reinforcement.`
+    });
+  } else if (mcWrong.length >= 3) {
+    growthCards.push({
+      title: 'Specific multiple choice gaps to address',
+      detail: `${firstName} answered ${mcWrong.length} multiple choice questions incorrectly: Q${mcWrong.map(r=>r.q).join(', Q')}. These represent targeted areas where conceptual understanding is not yet fully secure. Reviewing the content covered by each of these questions will help identify which specific standards to prioritize.`
+    });
+  }
+ 
+  // FR growth areas — questions with low scores
+  const weakFR = enrichedFR.filter(q => q.perfQ === 'Needs Support' || (q.perfQ === 'Approaching' && q.noCrits.length >= 2));
+  weakFR.slice(0, 2).forEach(q => {
+    const noCritList = q.noCrits.map(c => `"${c.criterion.split('(')[0].trim().replace(/\.$/, '')}"`);
+    const noCritSummary = noCritList.length > 0
+      ? ` Specifically, no credit was earned on: ${noCritList.slice(0,2).join('; ')}${noCritList.length > 2 ? '; and others' : ''}.`
+      : '';
+    growthCards.push({
+      title: `Needs support: ${q.title} (${q.primaryStd})`,
+      detail: `${firstName} earned only ${q.qTotal} out of ${q.maxPoints} points (${q.pctQ}%) on the "${q.title}" question, which addresses ${q.std}.${noCritSummary} The Massachusetts Curriculum Frameworks for ${gradeLabelSafe} expect students to demonstrate these skills, and targeted direct instruction — starting with concrete or visual representations — is recommended before moving to independent practice.`
+    });
+  });
+ 
+  // Partial credit pattern
+  const allPartialCrits = enrichedFR.flatMap(q => q.partialCrits.map(c => ({ ...c, qTitle: q.title, std: q.primaryStd })));
+  if (allPartialCrits.length >= 4) {
+    growthCards.push({
+      title: 'Partial understanding needs consolidation',
+      detail: `${firstName} earned partial credit (1/2) on ${allPartialCrits.length} individual criteria across the free response section. This pattern — getting part of a response right but not all of it — indicates that several skills are emerging but not yet fully secure. Examples include: ${allPartialCrits.slice(0,2).map(c => `"${c.criterion.split('(')[0].trim().replace(/\.$/, '')}" (${c.std})`).join('; ')}. Focused practice with immediate feedback would help convert these partial understandings into full mastery.`
+    });
+  }
+ 
+  if (growthCards.length === 0) {
+    growthCards.push({
+      title: 'Continued skill development across domains',
+      detail: `While ${firstName} showed strength in several areas, there remain opportunities to deepen understanding and improve consistency across all ${gradeLabelSafe} standards. Using the criterion-level scores below as a guide, targeted practice on any partially-demonstrated skills will help ${firstName} move toward full mastery.`
+    });
+  }
+ 
+  // ── STANDARDS ANALYSIS ─────────────────────────────────────────────────────
+  // This is the most important section — criterion-by-criterion accuracy
+  const standardsAnalysis = enrichedFR.map(q => {
+    const perf = q.perfQ;
+ 
+    // Build the evidence string showing exactly which criteria were hit
+    const scoreEvidence = `${q.qTotal} / ${q.maxPoints} pts · ${q.fullCrits.length} full, ${q.partialCrits.length} partial, ${q.noCrits.length} no credit`;
+ 
+    // Build criterion detail — list what was fully demonstrated vs missed
+    let critDetail = '';
+    if (q.fullCrits.length > 0) {
+      critDetail += `<strong>Demonstrated (full credit):</strong> ${q.fullCrits.map(c => c.criterion.split('(')[0].trim().replace(/\.$/, '')).join('; ')}. `;
+    }
+    if (q.partialCrits.length > 0) {
+      critDetail += `<strong>Partially demonstrated:</strong> ${q.partialCrits.map(c => c.criterion.split('(')[0].trim().replace(/\.$/, '')).join('; ')}. `;
+    }
+    if (q.noCrits.length > 0) {
+      critDetail += `<strong>Not yet demonstrated (no credit):</strong> ${q.noCrits.map(c => c.criterion.split('(')[0].trim().replace(/\.$/, '')).join('; ')}.`;
+    }
+ 
+    // Build the analysis paragraph — specific to this student's actual scores
+    let analysis = '';
+    if (perf === 'Demonstrated') {
+      analysis = `${firstName} demonstrated secure understanding of ${q.std}, earning ${q.qTotal} out of ${q.maxPoints} points (${q.pctQ}%). `;
+      if (q.fullCrits.length === q.scoredCrits.length) {
+        analysis += `All criteria received full credit, indicating that this standard is firmly mastered. `;
+      } else {
+        analysis += `${q.fullCrits.length} out of ${q.scoredCrits.length} scored criteria received full credit. `;
+        if (q.partialCrits.length > 0) {
+          analysis += `Partial credit on "${q.partialCrits[0].criterion.split('(')[0].trim().replace(/\.$/, '')}" suggests a small refinement is still needed, but overall this is a strong result. `;
+        }
+      }
+      analysis += `This is a reliable strength that can serve as a foundation for connecting to more advanced content in this domain.`;
+    } else if (perf === 'Approaching') {
+      analysis = `${firstName} showed partial understanding of ${q.std}, earning ${q.qTotal} out of ${q.maxPoints} points (${q.pctQ}%). `;
+      if (q.fullCrits.length > 0) {
+        analysis += `${q.fullCrits.length} criteria ${q.fullCrits.length === 1 ? 'was' : 'were'} fully demonstrated — specifically: ${q.fullCrits.map(c=>c.criterion.split('(')[0].trim().replace(/\.$/, '')).slice(0,2).join('; ')}. `;
+      }
+      if (q.noCrits.length > 0) {
+        analysis += `However, ${q.noCrits.length} ${q.noCrits.length === 1 ? 'criterion was' : 'criteria were'} not yet demonstrated: ${q.noCrits.map(c=>c.criterion.split('(')[0].trim().replace(/\.$/, '')).slice(0,2).join('; ')}. `;
+      }
+      analysis += `The Massachusetts Curriculum Frameworks for ${gradeLabelSafe} require students to fully demonstrate all components of this standard. Targeted review with worked examples and guided practice — focusing specifically on the unearned criteria — would help ${firstName} close this gap efficiently.`;
+    } else {
+      analysis = `${firstName} struggled significantly with ${q.std}, earning only ${q.qTotal} out of ${q.maxPoints} points (${q.pctQ}%). `;
+      if (q.noCrits.length > 0) {
+        analysis += `${q.noCrits.length} out of ${q.scoredCrits.length} scored criteria received no credit: ${q.noCrits.map(c=>c.criterion.split('(')[0].trim().replace(/\.$/, '')).slice(0,2).join('; ')}${q.noCrits.length > 2 ? '; and others' : ''}. `;
+      }
+      analysis += `This indicates that the foundational concepts behind this standard need direct, scaffolded instruction. Before ${firstName} can make meaningful progress here, we recommend revisiting prerequisite skills using concrete or visual models, introducing procedures step by step, and providing multiple worked examples before asking for independent application.`;
+    }
+ 
+    // Recommendation — specific to unmet criteria, not generic
+    let recommendation = '';
+    if (perf === 'Demonstrated') {
+      if (q.partialCrits.length > 0) {
+        recommendation = `Continue building on this strength. For the partially-met criterion — "${q.partialCrits[0].criterion.split('(')[0].trim().replace(/\.$/, '')}" — brief targeted practice should be enough to reach full mastery. Consider extending to related ${q.stdCodes[0]} applications.`;
+      } else {
+        recommendation = `Maintain and extend this skill. Consider using ${q.title.toLowerCase()} as an entry point for connecting to related standards in this domain. No remediation needed.`;
+      }
+    } else if (perf === 'Approaching') {
+      const focusCrits = [...q.noCrits, ...q.partialCrits].slice(0, 2);
+      recommendation = `Focus upcoming sessions on the ${focusCrits.length} unmet or partially-met ${focusCrits.length === 1 ? 'criterion' : 'criteria'}: ${focusCrits.map(c=>'"' + c.criterion.split('(')[0].trim().replace(/\.$/, '') + '"').join(' and ')}. Use ${q.std} as the instructional anchor, and check for full-credit demonstration before moving on.`;
+    } else {
+      recommendation = `Prioritize direct instruction on ${q.std}. Begin with ${q.noCrits.length > 0 ? '"' + q.noCrits[0].criterion.split('(')[0].trim().replace(/\.$/, '') + '"' : 'the core skill'}, using visual or manipulative-based models before moving to abstract notation. Re-assess on this specific question after 2–3 focused sessions.`;
+    }
+ 
     return {
-      standard: stdCode,
+      standard: q.std,
       name: q.title,
       performance: perf,
-      scoreEvidence: `${q.qTotal} / ${q.maxPoints} pts  ·  ${fullCredits} full credit, ${partial.filter(c=>c.qTitle===q.title).length} partial, ${noCredits} no credit`,
-      analysis: analysisMap[perf],
-      recommendation: recMap[perf]
+      scoreEvidence,
+      critDetail,
+      analysis,
+      recommendation
     };
   });
-
-  // Build strength and growth cards
-  const strengthCards = [];
-  const growthCards = [];
-
-  if (mcScore >= 14) {
-    strengthCards.push({ title: 'Strong conceptual knowledge', detail: `${firstName} answered ${mcScore} out of 20 multiple choice questions correctly (${mcPct}%), demonstrating solid command of the conceptual content covered in this assessment. This suggests a reliable foundation of grade-level mathematical understanding.` });
+ 
+  // ── RECOMMENDATIONS ────────────────────────────────────────────────────────
+  const needsSupportStds = enrichedFR.filter(q => q.perfQ === 'Needs Support');
+  const approachingStds  = enrichedFR.filter(q => q.perfQ === 'Approaching');
+ 
+  const recommendations = [];
+ 
+  if (needsSupportStds.length > 0 || approachingStds.length > 0) {
+    const priority = needsSupportStds.length > 0 ? 'High Priority' : 'Recommended';
+    const targetList = [...needsSupportStds, ...approachingStds].map(q => `${q.title} (${q.primaryStd})`);
+    recommendations.push({
+      title: 'Address specific gaps identified in the standards analysis',
+      priority,
+      detail: `Based on the criterion-level scores above, the highest-priority focus areas for upcoming sessions are: ${listOr(targetList)}. Use the individual criterion scores as a precise guide — a score of 0 on a criterion means that skill was not demonstrated and requires direct instruction; a score of 1 means the concept is emerging and needs reinforcement with guided practice and feedback. Where possible, anchor each session's objectives to the exact language of the 2017 Massachusetts Curriculum Frameworks so that ${firstName}'s learning targets are specific and measurable.`
+    });
   }
-  if (fullCredit.length >= 4) {
-    strengthCards.push({ title: 'Consistent full-credit responses', detail: `Across the free response section, ${firstName} earned full credit (2/2) on ${fullCredit.length} individual criteria. This indicates that when ${firstName} understands a concept, they can demonstrate it completely and accurately in written form.` });
-  }
-  if (strongest.qTotal >= 6) {
-    strengthCards.push({ title: `Strong performance: ${strongest.title.toLowerCase()}`, detail: `${firstName}'s highest free response score was on the "${strongest.title}" question (${strongest.qTotal}/${strongest.maxPoints}), which addresses ${strongest.std}. This is a meaningful strength to build from.` });
-  }
-  if (strengthCards.length === 0) {
-    strengthCards.push({ title: 'Effort and engagement', detail: `${firstName} attempted all sections of the assessment, which provides a complete picture of their current skill level. Even where scores are low, the effort to engage with each problem is an important starting point for growth.` });
-  }
-
-  if (mcScore < 12) {
-    growthCards.push({ title: 'Multiple choice accuracy', detail: `${firstName} answered ${20 - mcScore} multiple choice questions incorrectly. These questions assess conceptual understanding across all domains, and the pattern of errors should be reviewed to identify specific standards that need reinforcement.` });
-  }
-  if (noCredit.length >= 3) {
-    growthCards.push({ title: 'Free response completeness', detail: `${firstName} received no credit on ${noCredit.length} individual free response criteria. These represent clear gaps where the expected demonstration of the Massachusetts standard was not yet present, and they should be prioritized in upcoming instruction.` });
-  }
-  if (weakest.qTotal <= 4) {
-    growthCards.push({ title: `Needs support: ${weakest.title.toLowerCase()}`, detail: `The lowest free response score was on "${weakest.title}" (${weakest.qTotal}/${weakest.maxPoints}), addressing ${weakest.std}. This standard should be a focus for upcoming sessions, using worked examples and guided practice before independent application.` });
-  }
-  if (growthCards.length === 0) {
-    growthCards.push({ title: 'Continued skill development', detail: `While ${firstName} showed strength in several areas, there remain opportunities to deepen understanding and improve consistency across all standards covered in this assessment.` });
-  }
-
-  // Intro and summary
-  const dateStr = info.assessDate ? new Date(info.assessDate).toLocaleDateString('en-US',{year:'numeric',month:'long',day:'numeric'}) : 'a recent session';
-  const intro = `On ${dateStr}, ${firstName} completed the Wildewood Education ${gradeLabelSafe} Mathematics Practice Assessment. This assessment is aligned to the 2017 Massachusetts Curriculum Frameworks and covers all major domains of ${gradeLabel} mathematics through 20 multiple choice questions and 5 free response questions — including one error analysis task that asks students to identify, explain, and correct a mathematical mistake. The results below offer a detailed, standard-by-standard picture of ${firstName}'s current mathematical understanding, including evidence drawn directly from their responses.`;
-
-  const mcWrongStds = wrong.slice(0,3).map(r => FR_DATA[grade] ? '' : '').join('');
-  const topFR = frResults.filter(q=>q.qTotal>=6).map(q=>q.title.toLowerCase());
-  const lowFR = frResults.filter(q=>q.qTotal<=3).map(q=>q.title.toLowerCase());
-  const overallSummary = `${firstName} earned a total score of ${totalScore} out of 60 points (${pct}%), reflecting ${perfDesc} of ${gradeLabel} mathematics content. On the multiple choice section — which tests conceptual knowledge across all ${gradeLabelSafe} domains — ${firstName} answered ${mcScore} out of 20 questions correctly (${mcPct}%). ${mcScore >= 15 ? `This is a strong multiple choice result, suggesting that ${firstName} has a reliable command of key concepts across most domains.` : mcScore >= 10 ? `This result suggests solid understanding in some domains, with room to strengthen conceptual fluency in others.` : `This result indicates that several core concepts in ${gradeLabelSafe} need reinforcement before they are fully secure.`} On the free response section — which requires students to show full reasoning, apply procedures accurately, and explain their thinking — ${firstName} earned ${frScore} out of 40 points (${frPct}%). ${topFR.length > 0 ? `Strongest performance was on ${topFR.slice(0,2).join(' and ')}.` : ''} ${lowFR.length > 0 ? `The areas of greatest need are ${lowFR.slice(0,2).join(' and ')}.` : ''} Together, these results give us a clear picture of where ${firstName} is confident and where focused instructional support will have the greatest impact.`;
-
-  const recommendations = [
-    {
-      title: pct >= 70 ? 'Reinforce areas of partial understanding' : 'Prioritize targeted standard-by-standard support',
-      priority: pct >= 70 ? 'Recommended' : 'High Priority',
-      detail: `Based on the standards analysis above, the highest-priority focus areas for upcoming sessions are the standards marked "Needs Support" or "Approaching." Use the individual criterion scores as a precise guide — a score of 0 on a criterion means that skill was not demonstrated at all and requires direct instruction from the ground up; a score of 1 means the concept is emerging and needs reinforcement with additional practice and feedback. Where possible, anchor each session's objectives to the exact language of the 2017 Massachusetts Curriculum Frameworks so that ${firstName}'s learning targets are clear and measurable.`
-    },
-    {
-      title: 'Re-assess after focused practice',
-      priority: 'Recommended',
-      detail: `After 4–6 sessions of focused work on the identified gap areas, re-administer the relevant free response questions from this assessment. Tracking criterion-by-criterion progress — rather than just comparing total scores — gives the clearest and most actionable picture of growth. A student who earns 1 point instead of 0 on a criterion has made real progress even if their total score does not jump dramatically. Re-assessment data also gives ${firstName} a concrete, visible record of their own improvement, which builds motivation and mathematical confidence.`
-    },
-    {
-      title: 'Build on demonstrated strengths',
+ 
+  recommendations.push({
+    title: 'Re-assess after focused practice',
+    priority: 'Recommended',
+    detail: `After 3–5 sessions of focused work on the identified gap areas, re-administer the relevant free response questions. Track progress at the criterion level — not just by total score — because a student who earns 1 point instead of 0 on a criterion has made real, concrete progress even if their total score does not jump dramatically. Criterion-by-criterion tracking also gives ${firstName} a visible and specific record of their own improvement.`
+  });
+ 
+  if (strengthCards.length > 0) {
+    recommendations.push({
+      title: 'Build from demonstrated strengths',
       priority: 'Ongoing',
-      detail: `${firstName} showed genuine strength in ${strengthCards[0].title.toLowerCase()}. Use these strengths as entry points for harder material — connecting what ${firstName} already understands to new content creates more efficient learning. Celebrate specific wins from this assessment to build confidence alongside skill.`
-    }
-  ];
-
-  const closing = `Thank you for taking the time to administer this assessment and carefully record ${firstName}'s responses. The data you have collected gives us a meaningful, evidence-based snapshot of where ${firstName} stands right now in relation to the ${gradeLabelSafe} Massachusetts Curriculum Frameworks. The standards marked "Needs Support" in the analysis above are the most important starting points for upcoming sessions — and the standards marked "Demonstrated" are proof that ${firstName} has real mathematical knowledge to build from. We encourage you to revisit this report with ${firstName} if appropriate, share it with families, and use it to guide your instructional planning. Please reach out to the Wildewood Education team if you have any questions about these results or would like to discuss next steps.`;
-
+      detail: `${firstName} showed genuine mastery in ${demonstratedQs.length > 0 ? listOr(demonstratedQs) : strengthCards[0].title.toLowerCase()}. Use these strengths as entry points for harder material — connecting what ${firstName} already understands to new concepts creates more efficient learning and builds mathematical confidence. Celebrate specific criterion-level wins from this assessment to reinforce ${firstName}'s identity as a capable mathematical thinker.`
+    });
+  }
+ 
+  // ── CLOSING ────────────────────────────────────────────────────────────────
+  const closing = `Thank you for taking the time to administer this assessment and carefully record ${firstName}'s responses. The criterion-level data you have collected gives us a precise, evidence-based snapshot of where ${firstName} stands right now in relation to the ${gradeLabelSafe} Massachusetts Curriculum Frameworks. The standards marked "Needs Support" in the analysis above are the most important starting points for upcoming sessions — and the standards marked "Demonstrated" are concrete proof of what ${firstName} already knows. We encourage you to share this report with families and use it to guide your instructional planning. Please reach out to the Wildewood Education team if you have any questions about these results or would like to discuss next steps.`;
+ 
   return { intro, overallSummary, strengthCards, growthCards, standardsAnalysis, recommendations, closing };
 }
-
+  
 async function buildDocx(report, info) {
   const { studentName, instructor, assessDate, grade, hsGrade, gradeLabel, mcScore, frScore, totalScore, pct, frResults, mcResults } = info;
   const displayGrade = gradeLabel || (typeof grade === 'number' ? 'Grade ' + grade : grade);
@@ -747,25 +901,30 @@ async function buildDocx(report, info) {
     </div>`).join('');
 
   const stdBlocks = (report.standardsAnalysis||[]).map(s => `
-    <table style="width:100%;border-collapse:collapse;margin-bottom:14px;font-size:13px;">
-      <tr>
-        <td style="background:#EEEDFE;padding:10px 14px;width:58%;border:1px solid #AFA9EC;vertical-align:middle;">
-          <span style="font-weight:700;color:#3C3489;">${s.standard}</span>
-          <span style="color:#534AB7;margin-left:8px;">${s.name}</span>
-        </td>
-        <td style="background:${perfBg(s.performance)};padding:10px 14px;width:42%;border:1px solid #ddd;text-align:center;vertical-align:middle;">
-          <div style="font-weight:700;color:${perfColor(s.performance)};font-size:13px;">${s.performance}</div>
-          <div style="font-size:11px;color:#888780;margin-top:3px;">${s.scoreEvidence}</div>
-        </td>
-      </tr>
-      <tr>
-        <td style="padding:10px 14px;border:1px solid #ddd;vertical-align:top;color:#1a1a18;line-height:1.6;">${s.analysis}</td>
-        <td style="padding:10px 14px;border:1px solid #ddd;vertical-align:top;background:#fafaf8;">
-          <span style="font-weight:600;color:#0F6E56;font-size:12px;">Recommendation: </span>
-          <span style="font-size:12px;color:#1a1a18;line-height:1.6;">${s.recommendation}</span>
-        </td>
-      </tr>
-    </table>`).join('');
+  <table style="width:100%;border-collapse:collapse;margin-bottom:18px;font-size:13px;">
+    <tr>
+      <td style="background:#EEEDFE;padding:10px 14px;width:58%;border:1px solid #AFA9EC;vertical-align:middle;">
+        <span style="font-weight:700;color:#3C3489;">${s.standard}</span>
+        <span style="color:#534AB7;margin-left:8px;">${s.name}</span>
+      </td>
+      <td style="background:${perfBg(s.performance)};padding:10px 14px;width:42%;border:1px solid #ddd;text-align:center;vertical-align:middle;">
+        <div style="font-weight:700;color:${perfColor(s.performance)};font-size:13px;">${s.performance}</div>
+        <div style="font-size:11px;color:#888780;margin-top:3px;">${s.scoreEvidence}</div>
+      </td>
+    </tr>
+    <tr>
+      <td colspan="2" style="padding:10px 14px;border:1px solid #ddd;background:#fafaf8;font-size:12px;color:#1a1a18;line-height:1.7;">
+        ${s.critDetail}
+      </td>
+    </tr>
+    <tr>
+      <td style="padding:10px 14px;border:1px solid #ddd;vertical-align:top;color:#1a1a18;line-height:1.6;font-size:13px;">${s.analysis}</td>
+      <td style="padding:10px 14px;border:1px solid #ddd;vertical-align:top;background:#fafaf8;">
+        <span style="font-weight:600;color:#0F6E56;font-size:12px;">Recommendation: </span>
+        <span style="font-size:12px;color:#1a1a18;line-height:1.6;">${s.recommendation}</span>
+      </td>
+    </tr>
+  </table>`).join('');
 
   const recBlocks = (report.recommendations||[]).map(r => `
     <table style="width:100%;border-collapse:collapse;margin-bottom:14px;">
